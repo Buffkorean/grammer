@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Grammar Writer</title>
+<style>
+  body { width: 260px; font-family: -apple-system, system-ui, sans-serif; padding: 12px; color: #202124; }
+  h1 { font-size: 14px; margin: 0 0 10px; }
+  label { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; font-size: 13px; }
+  input[type="text"] { width: 100%; padding: 6px; border: 1px solid #dadce0; border-radius: 6px; font-size: 12px; margin-top: 4px; }
+  .row { margin-bottom: 10px; }
+  button { width: 100%; padding: 7px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; font-size: 13px; cursor: pointer; margin-top: 6px; }
+  #status { font-size: 11px; color: #5f6368; margin-top: 8px; min-height: 14px; }
+</style>
+</head>
+<body>
+  <h1>Grammar Writer</h1>
+
+  <label>
+    Enabled
+    <input type="checkbox" id="enabled" />
+  </label>
+  <label>
+    Auto-check while typing
+    <input type="checkbox" id="autoCheck" />
+  </label>
+
+  <div class="row">
+    <label for="backendUrl">Backend URL</label>
+    <input type="text" id="backendUrl" placeholder="http://localhost:3000" />
+  </div>
+
+  <button id="save">Save</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

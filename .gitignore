@@ -1,0 +1,11 @@
+# server (Next.js)
+server/node_modules/
+server/.next/
+server/next-env.d.ts
+server/.env
+server/.env.local
+server/.env*.local
+
+# misc
+.DS_Store
+*.log
