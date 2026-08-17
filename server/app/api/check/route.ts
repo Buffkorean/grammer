@@ -1,21 +1,12 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest, NextResponse } from "next/server";
 
-const MAX_TEXT_LENGTH = 8000;
-const MODEL = process.env.GRAMMAR_MODEL || "claude-haiku-4-5-20251001";
-
-const SYSTEM_PROMPT = `You are a grammar, spelling, punctuation, and style checker.
-Given a piece of writing, find issues and return ONLY a JSON array (no prose, no markdown fences) of objects shaped like:
-
-{"original": string, "replacement": string, "type": "grammar" | "spelling" | "punctuation" | "clarity" | "style", "message": string}
-
-Rules:
-- "original" MUST be an exact, verbatim substring of the input text (copy it character-for-character), long enough to be unambiguous but as short as possible — usually a few words, not a whole sentence.
-- "replacement" is the corrected text that should replace "original".
-- "message" is a short (under 15 words) explanation of the issue.
-- Do not flag stylistic choices that are already correct. Do not invent issues.
-- If the text has no issues, return [].
-- Return at most 20 issues, ordered by how much they matter.`;
+// LanguageTool's public API: free, no key required. Rate-limited to ~20
+// requests/minute per IP and prefers modest text sizes — see
+// https://languagetool.org/http-api/. Self-host LanguageTool (Docker) and
+// point LANGUAGETOOL_API_URL at it to remove those limits.
+const LT_API_URL = process.env.LANGUAGETOOL_API_URL || "https://api.languagetool.org/v2/check";
+const LT_LANGUAGE = process.env.LANGUAGETOOL_LANGUAGE || "en-US";
+const MAX_TEXT_LENGTH = 5000;
 
 type Issue = {
   original: string;
@@ -24,25 +15,41 @@ type Issue = {
   message: string;
 };
 
-function extractJsonArray(raw: string): unknown {
-  const start = raw.indexOf("[");
-  const end = raw.lastIndexOf("]");
-  if (start === -1 || end === -1 || end < start) {
-    throw new Error("Model response did not contain a JSON array");
-  }
-  return JSON.parse(raw.slice(start, end + 1));
+type LanguageToolMatch = {
+  message: string;
+  shortMessage?: string;
+  offset: number;
+  length: number;
+  replacements: { value: string }[];
+  rule?: {
+    issueType?: string;
+    category?: { id?: string };
+  };
+};
+
+function mapIssueType(match: LanguageToolMatch): string {
+  const issueType = match.rule?.issueType?.toLowerCase();
+  const categoryId = match.rule?.category?.id?.toUpperCase();
+
+  if (issueType === "misspelling" || categoryId === "TYPOS") return "spelling";
+  if (issueType === "grammar" || categoryId === "GRAMMAR" || categoryId === "CONFUSED_WORDS") return "grammar";
+  if (issueType === "typographical" || categoryId === "PUNCTUATION" || categoryId === "CASING") return "punctuation";
+  return "style";
 }
 
-function isValidIssue(value: unknown): value is Issue {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.original === "string" &&
-    v.original.length > 0 &&
-    typeof v.replacement === "string" &&
-    typeof v.type === "string" &&
-    typeof v.message === "string"
-  );
+function matchToIssue(text: string, match: LanguageToolMatch): Issue | null {
+  const replacement = match.replacements?.[0]?.value;
+  if (!replacement) return null; // nothing to apply, so not actionable in the panel
+
+  const original = text.slice(match.offset, match.offset + match.length);
+  if (!original) return null;
+
+  return {
+    original,
+    replacement,
+    type: mapIssueType(match),
+    message: match.shortMessage || match.message,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -61,36 +68,35 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `'text' must be under ${MAX_TEXT_LENGTH} characters` }, { status: 400 });
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return NextResponse.json({ error: "Server is missing ANTHROPIC_API_KEY" }, { status: 500 });
-  }
-
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-  let raw: string;
+  let matches: LanguageToolMatch[];
   try {
-    const message = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: text }],
+    const res = await fetch(LT_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ text, language: LT_LANGUAGE }),
     });
-    const block = message.content[0];
-    raw = block?.type === "text" ? block.text : "[]";
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return NextResponse.json(
+        { error: `LanguageTool returned ${res.status}: ${body.slice(0, 200)}` },
+        { status: 502 }
+      );
+    }
+
+    const data = await res.json();
+    matches = Array.isArray(data.matches) ? data.matches : [];
   } catch (err) {
-    return NextResponse.json({ error: `Model request failed: ${String((err as Error).message || err)}` }, { status: 502 });
+    return NextResponse.json(
+      { error: `LanguageTool request failed: ${String((err as Error).message || err)}` },
+      { status: 502 }
+    );
   }
 
-  let parsed: unknown;
-  try {
-    parsed = extractJsonArray(raw);
-  } catch {
-    return NextResponse.json({ error: "Model returned unparseable output" }, { status: 502 });
-  }
-
-  const issues = Array.isArray(parsed)
-    ? parsed.filter(isValidIssue).filter((issue) => text.includes(issue.original))
-    : [];
+  const issues = matches
+    .map((match) => matchToIssue(text, match))
+    .filter((issue): issue is Issue => issue !== null)
+    .slice(0, 20);
 
   return NextResponse.json({ issues });
 }
