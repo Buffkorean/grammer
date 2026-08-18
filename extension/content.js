@@ -3,6 +3,12 @@
   const EDITABLE_INPUT_TYPES = new Set([
     "text", "search", "email", "url", "tel", "", null,
   ]);
+  const TYPE_COLORS = {
+    spelling: "#d93025",
+    grammar: "#1a73e8",
+    punctuation: "#e37400",
+    style: "#188038",
+  };
 
   let settings = null;
   let activeField = null;
@@ -101,6 +107,110 @@
     debounceTimer = setTimeout(analyze, DEBOUNCE_MS);
   }
 
+  // ---- inline underlines ----
+  //
+  // Browsers give no way to style part of a <textarea>'s or <input>'s text,
+  // so we fake it the way Grammarly does: an invisible "mirror" positioned
+  // exactly on top of the real field, showing the same text in transparent
+  // ink except for wavy underlines on the flagged spans. pointer-events are
+  // off throughout so typing and clicking the real field underneath is
+  // completely unaffected — the overlay is purely visual.
+
+  const MIRROR_PROPS = [
+    "fontFamily", "fontSize", "fontWeight", "fontStyle", "lineHeight",
+    "letterSpacing", "textAlign", "textIndent", "textTransform", "wordSpacing",
+    "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+    "boxSizing", "direction",
+  ];
+
+  let overlayEl = null;
+  let overlayFor = null;
+  let overlayResizeObserver = null;
+
+  function computeIssueRanges(text, issueList) {
+    const ranges = [];
+    for (const issue of issueList) {
+      const start = text.indexOf(issue.original);
+      if (start === -1) continue;
+      ranges.push({ start, end: start + issue.original.length, issue });
+    }
+    ranges.sort((a, b) => a.start - b.start);
+
+    const nonOverlapping = [];
+    let cursor = 0;
+    for (const range of ranges) {
+      if (range.start < cursor) continue;
+      nonOverlapping.push(range);
+      cursor = range.end;
+    }
+    return nonOverlapping;
+  }
+
+  function buildOverlayMarkup(text, ranges) {
+    let html = "";
+    let pos = 0;
+    for (const { start, end, issue } of ranges) {
+      html += escapeHtml(text.slice(pos, start));
+      const color = TYPE_COLORS[issue.type] || TYPE_COLORS.style;
+      html += `<mark class="gw-mark" style="text-decoration-color:${color}">${escapeHtml(text.slice(start, end))}</mark>`;
+      pos = end;
+    }
+    html += escapeHtml(text.slice(pos));
+    return html;
+  }
+
+  function positionOverlay() {
+    if (!overlayEl || !overlayFor || !document.contains(overlayFor)) return;
+    const rect = overlayFor.getBoundingClientRect();
+    const computed = window.getComputedStyle(overlayFor);
+
+    overlayEl.style.left = `${rect.left}px`;
+    overlayEl.style.top = `${rect.top}px`;
+    overlayEl.style.width = `${rect.width}px`;
+    overlayEl.style.height = `${rect.height}px`;
+    for (const prop of MIRROR_PROPS) {
+      overlayEl.style[prop] = computed[prop];
+    }
+    overlayEl.scrollTop = overlayFor.scrollTop;
+    overlayEl.scrollLeft = overlayFor.scrollLeft;
+  }
+
+  function removeOverlay() {
+    if (overlayResizeObserver) {
+      overlayResizeObserver.disconnect();
+      overlayResizeObserver = null;
+    }
+    if (overlayFor) overlayFor.removeEventListener("scroll", positionOverlay);
+    if (overlayEl) overlayEl.innerHTML = "";
+    overlayFor = null;
+  }
+
+  function updateOverlay() {
+    if (!overlayEl) return;
+
+    if (!activeField || issues.length === 0) {
+      overlayEl.innerHTML = "";
+      return;
+    }
+
+    if (overlayFor !== activeField) {
+      overlayFor = activeField;
+      if (overlayResizeObserver) overlayResizeObserver.disconnect();
+      overlayResizeObserver = new ResizeObserver(positionOverlay);
+      overlayResizeObserver.observe(activeField);
+      activeField.addEventListener("scroll", positionOverlay, { passive: true });
+    }
+
+    const text = getText(activeField);
+    const ranges = computeIssueRanges(text, issues);
+    overlayEl.innerHTML = buildOverlayMarkup(text, ranges);
+    positionOverlay();
+  }
+
+  window.addEventListener("scroll", positionOverlay, { passive: true, capture: true });
+  window.addEventListener("resize", positionOverlay);
+
   // ---- UI (shadow DOM keeps host-page CSS from leaking in or out) ----
 
   let host, shadow, panelEl, toggleEl;
@@ -158,8 +268,23 @@
       .apply { background: #1a73e8; color: #fff; }
       .dismiss { background: #e8eaed; color: #202124; }
       .empty { padding: 20px; text-align: center; color: #5f6368; }
+      .gw-overlay {
+        position: fixed; z-index: 2147483646; pointer-events: none;
+        margin: 0; overflow: hidden; white-space: pre-wrap; word-wrap: break-word;
+        color: transparent; background: transparent;
+        border-style: solid; border-color: transparent;
+      }
+      .gw-overlay .gw-mark {
+        background: transparent; color: transparent;
+        text-decoration-line: underline; text-decoration-style: wavy;
+        text-decoration-thickness: 2px; text-underline-offset: 3px;
+      }
     `;
     shadow.appendChild(style);
+
+    overlayEl = document.createElement("div");
+    overlayEl.className = "gw-overlay";
+    shadow.appendChild(overlayEl);
 
     toggleEl = document.createElement("button");
     toggleEl.className = "toggle";
@@ -248,6 +373,7 @@
     }
 
     panelEl.appendChild(list);
+    updateOverlay();
   }
 
   function escapeHtml(str) {
@@ -264,14 +390,15 @@
       issues = [];
       lastCheckedText = "";
       clearTimeout(rateLimitRetryTimer);
+      removeOverlay();
       renderPanel();
     }
   });
 
   document.addEventListener("input", (e) => {
-    if (e.target === activeField && settings?.autoCheck) {
-      scheduleAnalyze();
-    }
+    if (e.target !== activeField) return;
+    updateOverlay(); // keep underlines tracking the live text between checks
+    if (settings?.autoCheck) scheduleAnalyze();
   });
 
   chrome.runtime.sendMessage({ type: "GET_SETTINGS" }, (response) => {
