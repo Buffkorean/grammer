@@ -7,6 +7,7 @@
   let settings = null;
   let activeField = null;
   let debounceTimer = null;
+  let rateLimitRetryTimer = null;
   let issues = [];
   let lastCheckedText = "";
   let checking = false;
@@ -79,6 +80,13 @@
         return;
       }
       if (!response?.ok) {
+        if (response?.rateLimited) {
+          const retryAfter = Number(response.retryAfter) || 15;
+          renderPanel(`Rate limited by the free grammar API — retrying in ${retryAfter}s…`);
+          clearTimeout(rateLimitRetryTimer);
+          rateLimitRetryTimer = setTimeout(analyze, retryAfter * 1000);
+          return;
+        }
         renderPanel(response?.error || "Could not reach the grammar backend.");
         return;
       }
@@ -255,6 +263,7 @@
       activeField = e.target;
       issues = [];
       lastCheckedText = "";
+      clearTimeout(rateLimitRetryTimer);
       renderPanel();
     }
   });

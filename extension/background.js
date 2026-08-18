@@ -20,8 +20,14 @@ async function checkText(text) {
   });
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Backend returned ${res.status}: ${body.slice(0, 200)}`);
+    const body = await res.json().catch(() => null);
+    if (res.status === 429 && body?.error === "rate_limited") {
+      const err = new Error(body.message || "Rate limited");
+      err.rateLimited = true;
+      err.retryAfter = body.retryAfter;
+      throw err;
+    }
+    throw new Error(body?.error || `Backend returned ${res.status}`);
   }
 
   return res.json();
@@ -31,7 +37,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "CHECK_TEXT") {
     checkText(message.text)
       .then((data) => sendResponse({ ok: true, data }))
-      .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
+      .catch((err) =>
+        sendResponse({
+          ok: false,
+          error: String(err.message || err),
+          rateLimited: !!err.rateLimited,
+          retryAfter: err.retryAfter,
+        })
+      );
     return true; // keep the message channel open for the async response
   }
 

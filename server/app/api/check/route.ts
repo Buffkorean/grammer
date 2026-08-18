@@ -37,6 +37,24 @@ function mapIssueType(match: LanguageToolMatch): string {
   return "style";
 }
 
+function fetchLanguageTool(text: string) {
+  return fetch(LT_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ text, language: LT_LANGUAGE }),
+  });
+}
+
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function matchToIssue(text: string, match: LanguageToolMatch): Issue | null {
   const replacement = match.replacements?.[0]?.value;
   if (!replacement) return null; // nothing to apply, so not actionable in the panel
@@ -70,11 +88,28 @@ export async function POST(req: NextRequest) {
 
   let matches: LanguageToolMatch[];
   try {
-    const res = await fetch(LT_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ text, language: LT_LANGUAGE }),
-    });
+    let res = await fetchLanguageTool(text);
+
+    // The free public API is rate-limited (~20 req/min/IP). One retry after
+    // the server's own Retry-After hint covers the common case — a burst of
+    // checks during active typing — without hammering it further.
+    if (res.status === 429) {
+      const retryAfter = parseRetryAfter(res.headers.get("Retry-After"));
+      await sleep(Math.min(retryAfter ?? 5, 8) * 1000);
+      res = await fetchLanguageTool(text);
+    }
+
+    if (res.status === 429) {
+      const retryAfter = parseRetryAfter(res.headers.get("Retry-After"));
+      return NextResponse.json(
+        {
+          error: "rate_limited",
+          message: "LanguageTool's free tier is rate-limited — try again in a few seconds.",
+          retryAfter: retryAfter ?? 15,
+        },
+        { status: 429 }
+      );
+    }
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
