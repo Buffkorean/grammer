@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest, NextResponse } from "next/server";
 
 // LanguageTool's public API: free, no key required. Rate-limited to ~20
@@ -7,6 +8,28 @@ import { NextRequest, NextResponse } from "next/server";
 const LT_API_URL = process.env.LANGUAGETOOL_API_URL || "https://api.languagetool.org/v2/check";
 const LT_LANGUAGE = process.env.LANGUAGETOOL_LANGUAGE || "en-US";
 const MAX_TEXT_LENGTH = 5000;
+
+// Optional second pass: LanguageTool is rule-based and doesn't catch awkward
+// or confusing sentence structure. If ANTHROPIC_API_KEY is set, Claude adds
+// structure/clarity suggestions on top of LanguageTool's grammar/spelling
+// results. Left unset, this pass is skipped entirely — no key, no cost.
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-haiku-4-5";
+
+const STRUCTURE_SYSTEM_PROMPT = `You review writing for sentence-structure and clarity problems only —
+NOT spelling, grammar rules, or punctuation (a separate rule-based checker already handles those).
+Look for: run-on or fragmented sentences, confusing word order, unclear pronoun references,
+and sentences that are needlessly hard to follow.
+
+Return ONLY a JSON array (no prose, no markdown fences) of objects shaped like:
+{"original": string, "replacement": string, "message": string}
+
+Rules:
+- "original" MUST be an exact, verbatim substring of the input text (copy it character-for-character).
+- "replacement" is a clearer rewrite of that exact span.
+- "message" is a short (under 15 words) explanation of what was unclear.
+- Do not flag spelling, grammar, or punctuation issues — assume those are already handled elsewhere.
+- If the structure is already clear, return [].
+- Return at most 10 issues.`;
 
 type Issue = {
   original: string;
@@ -70,6 +93,51 @@ function matchToIssue(text: string, match: LanguageToolMatch): Issue | null {
   };
 }
 
+function extractJsonArray(raw: string): unknown {
+  const start = raw.indexOf("[");
+  const end = raw.lastIndexOf("]");
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error("Model response did not contain a JSON array");
+  }
+  return JSON.parse(raw.slice(start, end + 1));
+}
+
+function isStructureIssueShape(value: unknown): value is { original: string; replacement: string; message: string } {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.original === "string" && v.original.length > 0 && typeof v.replacement === "string" && typeof v.message === "string";
+}
+
+// Best-effort: any failure here (missing/bad key, network, rate limit) just
+// means no structure suggestions this round — LanguageTool's results still
+// come back normally either way.
+async function checkStructure(text: string): Promise<Issue[]> {
+  if (!process.env.ANTHROPIC_API_KEY) return [];
+
+  try {
+    const anthropic = new Anthropic();
+    const response = await anthropic.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      system: STRUCTURE_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: text }],
+    });
+
+    const block = response.content.find((b) => b.type === "text");
+    const raw = block?.type === "text" ? block.text : "[]";
+    const parsed = extractJsonArray(raw);
+
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(isStructureIssueShape)
+      .filter((issue) => text.includes(issue.original))
+      .map((issue) => ({ ...issue, type: "structure" }));
+  } catch (err) {
+    console.error("Structure check skipped:", err);
+    return [];
+  }
+}
+
 export async function POST(req: NextRequest) {
   let body: unknown;
   try {
@@ -128,10 +196,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const issues = matches
+  const languageToolIssues = matches
     .map((match) => matchToIssue(text, match))
-    .filter((issue): issue is Issue => issue !== null)
-    .slice(0, 20);
+    .filter((issue): issue is Issue => issue !== null);
+
+  const structureIssues = await checkStructure(text);
+
+  const issues = [...languageToolIssues, ...structureIssues].slice(0, 20);
 
   return NextResponse.json({ issues });
 }

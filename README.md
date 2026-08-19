@@ -11,9 +11,11 @@ A grammar/style checker with two parts:
   is just one client of it. A future Word add-in, desktop app, or CLI could reuse the
   same endpoint.
 
-This is entirely free to run: LanguageTool is an open-source, rule-based checker, and
-the backend calls its free public API by default — no paid API key required anywhere
-in this stack.
+This is entirely free to run by default: LanguageTool is an open-source, rule-based
+checker, and the backend calls its free public API — no paid API key required. An
+optional second pass (Claude) can be layered on top for sentence-structure/clarity
+feedback that a rule-based checker can't do — see "Sentence-structure suggestions"
+below. Leave it unconfigured and the stack stays fully free.
 
 ## How it works
 
@@ -21,11 +23,12 @@ in this stack.
    typing) and sends the field's text to the background service worker.
 2. The background worker POSTs it to the backend's `/api/check` endpoint.
 3. The backend sends the text to LanguageTool and maps its matches into a JSON list of
-   issues: `{ original, replacement, type, message }`.
+   issues: `{ original, replacement, type, message }`. If `ANTHROPIC_API_KEY` is set, it
+   also asks Claude for sentence-structure/clarity issues and merges those in too.
 4. The content script underlines each flagged span directly in the field (red wavy =
-   spelling, blue = grammar, orange = punctuation, green = style) and lists them in a
-   small floating panel (bottom-right of the page). Click **Apply** to replace the
-   flagged text in place, or **Dismiss** to ignore it.
+   spelling, blue = grammar, orange = punctuation, green = style, purple = structure)
+   and lists them in a small floating panel (bottom-right of the page). Click **Apply**
+   to replace the flagged text in place, or **Dismiss** to ignore it.
 
 Inline underlines work by overlaying an invisible "mirror" of the field's text on top
 of it — the same technique Grammarly uses, since browsers give no way to style part of
@@ -58,13 +61,26 @@ docker run -p 8010:8010 erikvl87/languagetool
 then set `LANGUAGETOOL_API_URL=http://localhost:8010/v2/check` (no rate limit, fully
 private, runs on your own machine).
 
-### Trade-off vs. an LLM-based backend
+### Sentence-structure suggestions (optional)
 
-LanguageTool is rule-based, not an LLM — it's excellent at grammar, spelling, and
-punctuation, but won't do the nuanced tone/clarity rewrites an LLM can. If you want
-that later, swap `server/app/api/check/route.ts` to call an LLM instead (the original
-version of this backend used the Claude API); the rest of the stack (extension,
-Issue shape, panel UI) doesn't need to change.
+LanguageTool is rule-based — excellent at grammar, spelling, and punctuation, but it
+can't tell you a sentence is confusingly structured, since that takes actually
+understanding the sentence, not just pattern-matching it. To add that, set an
+Anthropic API key:
+
+```bash
+# server/.env.local
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Get a key at [console.anthropic.com](https://console.anthropic.com). With it set, every
+check also asks Claude Haiku for structure/clarity issues (a fast, low-cost model —
+chosen deliberately to keep this cheap; set `CLAUDE_MODEL` to use a different one) and
+merges them into the same result list, tagged `type: "structure"`. Leave the key unset
+and this pass is skipped entirely — no cost, no behavior change from the free-only
+setup. If the Claude call fails for any reason (bad key, rate limit, network issue),
+the request still succeeds with just LanguageTool's results — it never fails the whole
+check.
 
 ## Loading the extension
 
@@ -90,9 +106,10 @@ vercel deploy
 ```
 
 No environment variables are required for the default free public API. If you're
-self-hosting LanguageTool, set `LANGUAGETOOL_API_URL` as an environment variable in
-the Vercel project settings. Then update the extension's **Backend URL** in the popup
-to point at the deployed URL.
+self-hosting LanguageTool, set `LANGUAGETOOL_API_URL`; if you want structure/clarity
+suggestions, set `ANTHROPIC_API_KEY` — both as environment variables in the Vercel
+project settings. Then update the extension's **Backend URL** in the popup to point at
+the deployed URL.
 
 ## Beyond Chrome
 

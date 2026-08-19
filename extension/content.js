@@ -8,6 +8,7 @@
     grammar: "#1a73e8",
     punctuation: "#e37400",
     style: "#188038",
+    structure: "#8430ce",
   };
 
   let settings = null;
